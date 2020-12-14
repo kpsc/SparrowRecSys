@@ -4,8 +4,8 @@ import org.apache.log4j.{Level, Logger}
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.expressions.{UserDefinedFunction, Window}
 import org.apache.spark.sql.functions.{format_number, _}
-import org.apache.spark.sql.types.{DecimalType, FloatType, IntegerType}
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.types.{DecimalType, FloatType, IntegerType, LongType}
+import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import redis.clients.jedis.Jedis
 import redis.clients.jedis.params.SetParams
 
@@ -173,6 +173,37 @@ object FeatureEngForRecModel {
     movieLatestSamples
   }
 
+  def splitAndSaveTrainingTestSamples(samples:DataFrame, savePath:String)={
+    //generate a smaller sample set for demo
+    val smallSamples = samples.sample(0.1)
+
+    //split training and test set by 8:2
+    val Array(training, test) = smallSamples.randomSplit(Array(0.8, 0.2))
+
+    val sampleResourcesPath = this.getClass.getResource(savePath)
+    training.repartition(1).write.option("header", "true").mode(SaveMode.Overwrite)
+      .csv(sampleResourcesPath+"/trainingSamples")
+    test.repartition(1).write.option("header", "true").mode(SaveMode.Overwrite)
+      .csv(sampleResourcesPath+"/testSamples")
+  }
+
+  def splitAndSaveTrainingTestSamplesByTimeStamp(samples:DataFrame, savePath:String)={
+    //generate a smaller sample set for demo
+    val smallSamples = samples.sample(0.1).withColumn("timestampLong", col("timestamp").cast(LongType))
+
+    val quantile = smallSamples.stat.approxQuantile("timestampLong", Array(0.8), 0.05)
+    val splitTimestamp = quantile.apply(0)
+
+    val training = smallSamples.where(col("timestampLong") <= splitTimestamp).drop("timestampLong")
+    val test = smallSamples.where(col("timestampLong") > splitTimestamp).drop("timestampLong")
+
+    val sampleResourcesPath = this.getClass.getResource(savePath)
+    training.repartition(1).write.option("header", "true").mode(SaveMode.Overwrite)
+      .csv(sampleResourcesPath+"/trainingSamples")
+    test.repartition(1).write.option("header", "true").mode(SaveMode.Overwrite)
+      .csv(sampleResourcesPath+"/testSamples")
+  }
+
 
   def extractAndSaveUserFeaturesToRedis(samples:DataFrame): DataFrame = {
     val userLatestSamples = samples.withColumn("userRowNum", row_number()
@@ -211,7 +242,7 @@ object FeatureEngForRecModel {
       valueMap("userGenre4") = sample.getAs[String]("userGenre4")
       valueMap("userGenre5") = sample.getAs[String]("userGenre5")
       valueMap("userRatingCount") = sample.getAs[Long]("userRatingCount").toString
-      valueMap("userAvgReleaseYear") = sample.getAs[String]("userAvgReleaseYear")
+      valueMap("userAvgReleaseYear") = sample.getAs[Int]("userAvgReleaseYear").toString
       valueMap("userReleaseYearStddev") = sample.getAs[String]("userReleaseYearStddev")
       valueMap("userAvgRating") = sample.getAs[String]("userAvgRating")
       valueMap("userRatingStddev") = sample.getAs[String]("userRatingStddev")
@@ -250,15 +281,12 @@ object FeatureEngForRecModel {
 
 
     //save samples as csv format
-
-
-    val sampleResourcesPath = this.getClass.getResource("/webroot/sampledata")
-    samplesWithUserFeatures.sample(0.1).repartition(1).write.option("header", "true")
-      .csv(sampleResourcesPath+"/modelsamples")
+    splitAndSaveTrainingTestSamples(samplesWithUserFeatures, "/webroot/sampledata")
 
     //save user features and item features to redis for online inference
     //extractAndSaveUserFeaturesToRedis(samplesWithUserFeatures)
     //extractAndSaveMovieFeaturesToRedis(samplesWithUserFeatures)
+    spark.close()
   }
 
 }
